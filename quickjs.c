@@ -10664,9 +10664,11 @@ retry:
                             JS_FreeValue(ctx, val);
                             return ret;
                         }
+                        if (p && find_own_property(&pr, p, prop)) {
+                            p1 = p;
+                            goto retry;
+                        }
                         if (find_own_property(&pr, p1, prop)) {
-                            if (p == p1)
-                                goto retry;
                             goto retry2;
                         }
                     }
