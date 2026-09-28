@@ -10662,6 +10662,9 @@ retry:
                                                val, this_obj, flags);
                         if (ret != JS_EXOTIC_FALLTHROUGH) {
                             JS_FreeValue(ctx, val);
+                            if (ret == false)
+                                return JS_ThrowTypeErrorOrFalse(ctx, flags,
+                                                                 "cannot set property");
                             return ret;
                         }
                         if (p && find_own_property(&pr, p, prop)) {
