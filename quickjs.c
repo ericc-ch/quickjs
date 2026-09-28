@@ -10660,7 +10660,8 @@ retry:
                     if (em->set_property) {
                         ret = em->set_property(ctx, *held_prototype, prop,
                                                val, this_obj, flags);
-                        if (ret != JS_EXOTIC_FALLTHROUGH) {
+                        if (ret != JS_EXOTIC_FALLTHROUGH &&
+                            ret != JS_EXOTIC_FALLTHROUGH_SKIP_OWN) {
                             JS_FreeValue(ctx, val);
                             if (ret == false)
                                 return JS_ThrowTypeErrorOrFalse(ctx, flags,
@@ -10674,6 +10675,8 @@ retry:
                         if (find_own_property(&pr, p1, prop)) {
                             goto retry2;
                         }
+                        if (ret == JS_EXOTIC_FALLTHROUGH_SKIP_OWN)
+                            goto next_prototype;
                     }
                     if (em->get_own_property) {
                         ret = em->get_own_property(ctx, &desc,
@@ -10710,6 +10713,7 @@ retry:
                 }
             }
         }
+    next_prototype:
         p1 = p1->shape->proto;
     prototype_lookup:
         if (!p1)

@@ -666,13 +666,15 @@ typedef struct JSClassExoticMethods {
     JSValue (*get_property)(JSContext *ctx, JSValueConst obj, JSAtom atom,
                             JSValueConst receiver);
     /* Return < 0 if exception, true/false if handled, or
-       JS_EXOTIC_FALLTHROUGH to continue the ordinary [[Set]] algorithm.
+       JS_EXOTIC_FALLTHROUGH to continue the ordinary [[Set]] algorithm,
+       or JS_EXOTIC_FALLTHROUGH_SKIP_OWN to continue at the prototype.
        A callback that falls through must not consume 'value'. */
     int (*set_property)(JSContext *ctx, JSValueConst obj, JSAtom atom,
                          JSValueConst value, JSValueConst receiver, int flags);
 } JSClassExoticMethods;
 
 #define JS_EXOTIC_FALLTHROUGH 2
+#define JS_EXOTIC_FALLTHROUGH_SKIP_OWN 3
 
 typedef void JSClassFinalizer(JSRuntime *rt, JSValueConst val);
 typedef void JSClassGCMark(JSRuntime *rt, JSValueConst val,
