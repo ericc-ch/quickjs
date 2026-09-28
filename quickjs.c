@@ -9515,6 +9515,8 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
     JSAtom atom;
     uint32_t num_keys_count, str_keys_count, sym_keys_count, atom_count;
     uint32_t num_index, str_index, sym_index, exotic_count, exotic_keys_count;
+    uint32_t exotic_num_count, exotic_str_count, exotic_num_index;
+    uint32_t exotic_str_index, exotic_sym_index;
     bool is_enumerable, num_sorted;
     uint32_t num_key;
     JSAtomKindEnum kind;
@@ -9528,6 +9530,8 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
     str_keys_count = 0;
     sym_keys_count = 0;
     exotic_keys_count = 0;
+    exotic_num_count = 0;
+    exotic_str_count = 0;
     exotic_count = 0;
     tab_exotic = NULL;
     sh = p->shape;
@@ -9595,6 +9599,10 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
                         }
                         if (!(flags & JS_GPN_ENUM_ONLY) || is_enumerable) {
                             exotic_keys_count++;
+                            if (JS_AtomIsArrayIndex(ctx, &num_key, atom))
+                                exotic_num_count++;
+                            else if (kind == JS_ATOM_KIND_STRING)
+                                exotic_str_count++;
                         }
                     }
                 }
@@ -9612,9 +9620,12 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
         return -1;
     }
 
-    num_index = 0;
-    str_index = num_keys_count;
+    exotic_num_index = 0;
+    num_index = exotic_num_count;
+    exotic_str_index = num_index + num_keys_count;
+    str_index = exotic_str_index + exotic_str_count;
     sym_index = str_index + str_keys_count;
+    exotic_sym_index = sym_index + sym_keys_count;
 
     num_sorted = true;
     sh = p->shape;
@@ -9661,16 +9672,22 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
                 }
             }
         } else {
-            /* Note: exotic keys are not reordered and comes after the object own properties. */
+            /* Computed indices and names precede ordinary own properties. */
             for(i = 0; i < exotic_count; i++) {
                 atom = tab_exotic[i].atom;
                 is_enumerable = tab_exotic[i].is_enumerable;
                 kind = JS_AtomGetKind(ctx, atom);
                 if ((!(flags & JS_GPN_ENUM_ONLY) || is_enumerable) &&
                     ((flags >> kind) & 1) != 0) {
-                    tab_atom[sym_index].atom = atom;
-                    tab_atom[sym_index].is_enumerable = is_enumerable;
-                    sym_index++;
+                    if (JS_AtomIsArrayIndex(ctx, &num_key, atom)) {
+                        j = exotic_num_index++;
+                    } else if (kind == JS_ATOM_KIND_STRING) {
+                        j = exotic_str_index++;
+                    } else {
+                        j = exotic_sym_index++;
+                    }
+                    tab_atom[j].atom = atom;
+                    tab_atom[j].is_enumerable = is_enumerable;
                 } else {
                     JS_FreeAtom(ctx, atom);
                 }
@@ -9679,12 +9696,15 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
         }
     }
 
-    assert(num_index == num_keys_count);
-    assert(str_index == num_keys_count + str_keys_count);
-    assert(sym_index == atom_count);
+    assert(exotic_num_index == exotic_num_count);
+    assert(num_index == exotic_num_count + num_keys_count);
+    assert(exotic_str_index == exotic_num_count + num_keys_count + exotic_str_count);
+    assert(str_index == exotic_num_count + num_keys_count + exotic_str_count + str_keys_count);
+    assert(sym_index == str_index + sym_keys_count);
+    assert(exotic_sym_index == atom_count);
 
     if (num_keys_count != 0 && !num_sorted) {
-        rqsort(tab_atom, num_keys_count, sizeof(tab_atom[0]), num_keys_cmp,
+        rqsort(tab_atom + exotic_num_count, num_keys_count, sizeof(tab_atom[0]), num_keys_cmp,
                ctx);
     }
     *ptab = tab_atom;
