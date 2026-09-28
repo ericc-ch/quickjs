@@ -9703,6 +9703,9 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
     assert(sym_index == str_index + sym_keys_count);
     assert(exotic_sym_index == atom_count);
 
+    if (exotic_num_count > 1) {
+        rqsort(tab_atom, exotic_num_count, sizeof(tab_atom[0]), num_keys_cmp, ctx);
+    }
     if (num_keys_count != 0 && !num_sorted) {
         rqsort(tab_atom + exotic_num_count, num_keys_count, sizeof(tab_atom[0]), num_keys_cmp,
                ctx);
@@ -11137,6 +11140,10 @@ static int JS_CreateProperty(JSContext *ctx, JSObject *p,
                                                              "cannot define property");
                         return ret;
                     }
+                    /* The callback can create this property before declining. */
+                    if (find_own_property(&pr, p, prop))
+                        return JS_DefineProperty(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
+                                                 prop, val, getter, setter, flags);
                 }
                 ret = JS_IsExtensible(ctx, JS_MKPTR(JS_TAG_OBJECT, p));
                 if (ret < 0)
