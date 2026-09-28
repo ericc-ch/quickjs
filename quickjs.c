@@ -10657,8 +10657,10 @@ retry:
                         ret = em->set_property(ctx, obj1, prop,
                                                val, this_obj, flags);
                         JS_FreeValue(ctx, obj1);
-                        JS_FreeValue(ctx, val);
-                        return ret;
+                        if (ret != JS_EXOTIC_FALLTHROUGH) {
+                            JS_FreeValue(ctx, val);
+                            return ret;
+                        }
                     }
                     if (em->get_own_property) {
                         /* get_own_property can free the prototype */
