@@ -11129,8 +11129,14 @@ static int JS_CreateProperty(JSContext *ctx, JSObject *p,
             const JSClassExoticMethods *em = ctx->rt->class_array[p->class_id].exotic;
             if (em) {
                 if (em->define_own_property) {
-                    return em->define_own_property(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
-                                                   prop, val, getter, setter, flags);
+                    ret = em->define_own_property(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
+                                                  prop, val, getter, setter, flags);
+                    if (ret != JS_EXOTIC_FALLTHROUGH) {
+                        if (ret == false)
+                            return JS_ThrowTypeErrorOrFalse(ctx, flags,
+                                                             "cannot define property");
+                        return ret;
+                    }
                 }
                 ret = JS_IsExtensible(ctx, JS_MKPTR(JS_TAG_OBJECT, p));
                 if (ret < 0)
