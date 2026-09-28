@@ -10539,8 +10539,9 @@ static void js_free_desc(JSContext *ctx, JSPropertyDescriptor *desc)
    the new property is not added and an error is raised.
    'obj' must be an object when obj != this_obj.
    */
-static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop,
-                                   JSValue val, JSValueConst this_obj, int flags)
+static int JS_SetPropertyInternal2Impl(JSContext *ctx, JSValueConst obj, JSAtom prop,
+                                       JSValue val, JSValueConst this_obj, int flags,
+                                       JSValue *held_prototype)
 {
     JSObject *p, *p1;
     JSShapeProperty *prs;
@@ -10651,23 +10652,27 @@ retry:
                 const JSClassExoticMethods *em = ctx->rt->class_array[p1->class_id].exotic;
                 if (em) {
                     JSValue obj1;
-                    if (em->set_property) {
-                        /* set_property can free the prototype */
+                    if (em->set_property || em->get_own_property) {
                         obj1 = js_dup(JS_MKPTR(JS_TAG_OBJECT, p1));
-                        ret = em->set_property(ctx, obj1, prop,
+                        JS_FreeValue(ctx, *held_prototype);
+                        *held_prototype = obj1;
+                    }
+                    if (em->set_property) {
+                        ret = em->set_property(ctx, *held_prototype, prop,
                                                val, this_obj, flags);
-                        JS_FreeValue(ctx, obj1);
                         if (ret != JS_EXOTIC_FALLTHROUGH) {
                             JS_FreeValue(ctx, val);
                             return ret;
                         }
+                        if (find_own_property(&pr, p1, prop)) {
+                            if (p == p1)
+                                goto retry;
+                            goto retry2;
+                        }
                     }
                     if (em->get_own_property) {
-                        /* get_own_property can free the prototype */
-                        obj1 = js_dup(JS_MKPTR(JS_TAG_OBJECT, p1));
                         ret = em->get_own_property(ctx, &desc,
-                                                   obj1, prop);
-                        JS_FreeValue(ctx, obj1);
+                                                   *held_prototype, prop);
                         if (ret < 0)
                             goto fail;
                         if (ret) {
@@ -10798,6 +10803,16 @@ done:
 fail:
     JS_FreeValue(ctx, val);
     return -1;
+}
+
+static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop,
+                                   JSValue val, JSValueConst this_obj, int flags)
+{
+    JSValue held_prototype = JS_UNDEFINED;
+    int ret = JS_SetPropertyInternal2Impl(ctx, obj, prop, val, this_obj,
+                                          flags, &held_prototype);
+    JS_FreeValue(ctx, held_prototype);
+    return ret;
 }
 
 static int JS_SetPropertyInternal(JSContext *ctx, JSValueConst obj, JSAtom prop,
