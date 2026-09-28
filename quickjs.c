@@ -9511,6 +9511,7 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
     int i, j;
     JSShape *sh;
     JSShapeProperty *prs;
+    JSProperty *own_prop;
     JSPropertyEnum *tab_atom, *tab_exotic;
     JSAtom atom;
     uint32_t num_keys_count, str_keys_count, sym_keys_count, atom_count;
@@ -9580,6 +9581,8 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
                     return -1;
                 for(i = 0; i < exotic_count; i++) {
                     atom = tab_exotic[i].atom;
+                    if (find_own_property(&own_prop, p, atom))
+                        continue;
                     kind = JS_AtomGetKind(ctx, atom);
                     if (((flags >> kind) & 1) != 0) {
                         is_enumerable = false;
@@ -9675,6 +9678,10 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
             /* Computed indices and names precede ordinary own properties. */
             for(i = 0; i < exotic_count; i++) {
                 atom = tab_exotic[i].atom;
+                if (find_own_property(&own_prop, p, atom)) {
+                    JS_FreeAtom(ctx, atom);
+                    continue;
+                }
                 is_enumerable = tab_exotic[i].is_enumerable;
                 kind = JS_AtomGetKind(ctx, atom);
                 if ((!(flags & JS_GPN_ENUM_ONLY) || is_enumerable) &&
