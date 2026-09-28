@@ -9516,10 +9516,13 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
     int i, j;
     JSShape *sh;
     JSShapeProperty *prs;
+    JSProperty *own_prop;
     JSPropertyEnum *tab_atom, *tab_exotic;
     JSAtom atom;
     uint32_t num_keys_count, str_keys_count, sym_keys_count, atom_count;
     uint32_t num_index, str_index, sym_index, exotic_count, exotic_keys_count;
+    uint32_t exotic_num_count, exotic_str_count, exotic_num_index;
+    uint32_t exotic_str_index, exotic_sym_index;
     bool is_enumerable, num_sorted;
     uint32_t num_key;
     JSAtomKindEnum kind;
@@ -9533,6 +9536,8 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
     str_keys_count = 0;
     sym_keys_count = 0;
     exotic_keys_count = 0;
+    exotic_num_count = 0;
+    exotic_str_count = 0;
     exotic_count = 0;
     tab_exotic = NULL;
     sh = p->shape;
@@ -9581,6 +9586,8 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
                     return -1;
                 for(i = 0; i < exotic_count; i++) {
                     atom = tab_exotic[i].atom;
+                    if (find_own_property(&own_prop, p, atom))
+                        continue;
                     kind = JS_AtomGetKind(ctx, atom);
                     if (((flags >> kind) & 1) != 0) {
                         is_enumerable = false;
@@ -9600,6 +9607,10 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
                         }
                         if (!(flags & JS_GPN_ENUM_ONLY) || is_enumerable) {
                             exotic_keys_count++;
+                            if (JS_AtomIsArrayIndex(ctx, &num_key, atom))
+                                exotic_num_count++;
+                            else if (kind == JS_ATOM_KIND_STRING)
+                                exotic_str_count++;
                         }
                     }
                 }
@@ -9617,9 +9628,12 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
         return -1;
     }
 
-    num_index = 0;
-    str_index = num_keys_count;
+    exotic_num_index = 0;
+    num_index = exotic_num_count;
+    exotic_str_index = num_index + num_keys_count;
+    str_index = exotic_str_index + exotic_str_count;
     sym_index = str_index + str_keys_count;
+    exotic_sym_index = sym_index + sym_keys_count;
 
     num_sorted = true;
     sh = p->shape;
@@ -9666,16 +9680,26 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
                 }
             }
         } else {
-            /* Note: exotic keys are not reordered and comes after the object own properties. */
+            /* Computed indices and names precede ordinary own properties. */
             for(i = 0; i < exotic_count; i++) {
                 atom = tab_exotic[i].atom;
+                if (find_own_property(&own_prop, p, atom)) {
+                    JS_FreeAtom(ctx, atom);
+                    continue;
+                }
                 is_enumerable = tab_exotic[i].is_enumerable;
                 kind = JS_AtomGetKind(ctx, atom);
                 if ((!(flags & JS_GPN_ENUM_ONLY) || is_enumerable) &&
                     ((flags >> kind) & 1) != 0) {
-                    tab_atom[sym_index].atom = atom;
-                    tab_atom[sym_index].is_enumerable = is_enumerable;
-                    sym_index++;
+                    if (JS_AtomIsArrayIndex(ctx, &num_key, atom)) {
+                        j = exotic_num_index++;
+                    } else if (kind == JS_ATOM_KIND_STRING) {
+                        j = exotic_str_index++;
+                    } else {
+                        j = exotic_sym_index++;
+                    }
+                    tab_atom[j].atom = atom;
+                    tab_atom[j].is_enumerable = is_enumerable;
                 } else {
                     JS_FreeAtom(ctx, atom);
                 }
@@ -9684,12 +9708,18 @@ static int __exception JS_GetOwnPropertyNamesInternal(JSContext *ctx,
         }
     }
 
-    assert(num_index == num_keys_count);
-    assert(str_index == num_keys_count + str_keys_count);
-    assert(sym_index == atom_count);
+    assert(exotic_num_index == exotic_num_count);
+    assert(num_index == exotic_num_count + num_keys_count);
+    assert(exotic_str_index == exotic_num_count + num_keys_count + exotic_str_count);
+    assert(str_index == exotic_num_count + num_keys_count + exotic_str_count + str_keys_count);
+    assert(sym_index == str_index + sym_keys_count);
+    assert(exotic_sym_index == atom_count);
 
+    if (exotic_num_count > 1) {
+        rqsort(tab_atom, exotic_num_count, sizeof(tab_atom[0]), num_keys_cmp, ctx);
+    }
     if (num_keys_count != 0 && !num_sorted) {
-        rqsort(tab_atom, num_keys_count, sizeof(tab_atom[0]), num_keys_cmp,
+        rqsort(tab_atom + exotic_num_count, num_keys_count, sizeof(tab_atom[0]), num_keys_cmp,
                ctx);
     }
     *ptab = tab_atom;
@@ -10544,8 +10574,9 @@ static void js_free_desc(JSContext *ctx, JSPropertyDescriptor *desc)
    the new property is not added and an error is raised.
    'obj' must be an object when obj != this_obj.
    */
-static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop,
-                                   JSValue val, JSValueConst this_obj, int flags)
+static int JS_SetPropertyInternal2Impl(JSContext *ctx, JSValueConst obj, JSAtom prop,
+                                       JSValue val, JSValueConst this_obj, int flags,
+                                       JSValue *held_prototype)
 {
     JSObject *p, *p1;
     JSShapeProperty *prs;
@@ -10656,21 +10687,35 @@ retry:
                 const JSClassExoticMethods *em = ctx->rt->class_array[p1->class_id].exotic;
                 if (em) {
                     JSValue obj1;
-                    if (em->set_property) {
-                        /* set_property can free the prototype */
+                    if (em->set_property || em->get_own_property) {
                         obj1 = js_dup(JS_MKPTR(JS_TAG_OBJECT, p1));
-                        ret = em->set_property(ctx, obj1, prop,
+                        JS_FreeValue(ctx, *held_prototype);
+                        *held_prototype = obj1;
+                    }
+                    if (em->set_property) {
+                        ret = em->set_property(ctx, *held_prototype, prop,
                                                val, this_obj, flags);
-                        JS_FreeValue(ctx, obj1);
-                        JS_FreeValue(ctx, val);
-                        return ret;
+                        if (ret != JS_EXOTIC_FALLTHROUGH &&
+                            ret != JS_EXOTIC_FALLTHROUGH_SKIP_OWN) {
+                            JS_FreeValue(ctx, val);
+                            if (ret == false)
+                                return JS_ThrowTypeErrorOrFalse(ctx, flags,
+                                                                 "cannot set property");
+                            return ret;
+                        }
+                        if (p && find_own_property(&pr, p, prop)) {
+                            p1 = p;
+                            goto retry;
+                        }
+                        if (find_own_property(&pr, p1, prop)) {
+                            goto retry2;
+                        }
+                        if (ret == JS_EXOTIC_FALLTHROUGH_SKIP_OWN)
+                            goto next_prototype;
                     }
                     if (em->get_own_property) {
-                        /* get_own_property can free the prototype */
-                        obj1 = js_dup(JS_MKPTR(JS_TAG_OBJECT, p1));
                         ret = em->get_own_property(ctx, &desc,
-                                                   obj1, prop);
-                        JS_FreeValue(ctx, obj1);
+                                                   *held_prototype, prop);
                         if (ret < 0)
                             goto fail;
                         if (ret) {
@@ -10703,6 +10748,7 @@ retry:
                 }
             }
         }
+    next_prototype:
         p1 = p1->shape->proto;
     prototype_lookup:
         if (!p1)
@@ -10801,6 +10847,16 @@ done:
 fail:
     JS_FreeValue(ctx, val);
     return -1;
+}
+
+static int JS_SetPropertyInternal2(JSContext *ctx, JSValueConst obj, JSAtom prop,
+                                   JSValue val, JSValueConst this_obj, int flags)
+{
+    JSValue held_prototype = JS_UNDEFINED;
+    int ret = JS_SetPropertyInternal2Impl(ctx, obj, prop, val, this_obj,
+                                          flags, &held_prototype);
+    JS_FreeValue(ctx, held_prototype);
+    return ret;
 }
 
 static int JS_SetPropertyInternal(JSContext *ctx, JSValueConst obj, JSAtom prop,
@@ -11088,8 +11144,18 @@ static int JS_CreateProperty(JSContext *ctx, JSObject *p,
             const JSClassExoticMethods *em = ctx->rt->class_array[p->class_id].exotic;
             if (em) {
                 if (em->define_own_property) {
-                    return em->define_own_property(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
-                                                   prop, val, getter, setter, flags);
+                    ret = em->define_own_property(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
+                                                  prop, val, getter, setter, flags);
+                    if (ret != JS_EXOTIC_FALLTHROUGH) {
+                        if (ret == false)
+                            return JS_ThrowTypeErrorOrFalse(ctx, flags,
+                                                             "cannot define property");
+                        return ret;
+                    }
+                    /* The callback can create this property before declining. */
+                    if (find_own_property(&pr, p, prop))
+                        return JS_DefineProperty(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
+                                                 prop, val, getter, setter, flags);
                 }
                 ret = JS_IsExtensible(ctx, JS_MKPTR(JS_TAG_OBJECT, p));
                 if (ret < 0)
