@@ -10693,8 +10693,21 @@ retry:
                         *held_prototype = obj1;
                     }
                     if (em->set_property) {
+                        /* Pin the receiver across the callback: the setter may
+                           drop the last reference, which would leave `p`
+                           dangling on the `p != p1` (super/Reflect) path.
+                           `this_obj` is only a tagged pointer, not a ref. */
+                        JSValue held_receiver = JS_DupValue(ctx, this_obj);
+                        /* OrdinarySet (https://tc39.es/ecma262/#sec-ordinaryset)
+                           never consults pre-existing receiver own properties
+                           during traversal. Only a property the callback just
+                           created takes the in-place update path; otherwise
+                           traversal continues so later prototypes' setters win,
+                           with receiver-own handled at the end. */
+                        bool had_receiver_own = p && find_own_property(&pr, p, prop);
                         ret = em->set_property(ctx, *held_prototype, prop,
                                                val, this_obj, flags);
+                        JS_FreeValue(ctx, held_receiver);
                         if (ret != JS_EXOTIC_FALLTHROUGH &&
                             ret != JS_EXOTIC_FALLTHROUGH_SKIP_OWN) {
                             JS_FreeValue(ctx, val);
@@ -10703,7 +10716,7 @@ retry:
                                                                  "cannot set property");
                             return ret;
                         }
-                        if (p && find_own_property(&pr, p, prop)) {
+                        if (p && !had_receiver_own && find_own_property(&pr, p, prop)) {
                             p1 = p;
                             goto retry;
                         }
@@ -11146,7 +11159,12 @@ static int JS_CreateProperty(JSContext *ctx, JSObject *p,
                 if (em->define_own_property) {
                     ret = em->define_own_property(ctx, JS_MKPTR(JS_TAG_OBJECT, p),
                                                   prop, val, getter, setter, flags);
-                    if (ret != JS_EXOTIC_FALLTHROUGH) {
+                    /* Only FALLTHROUGH continues ordinary definition; SKIP_OWN
+                       is a [[Set]]-only signal, treated as fallthrough here so
+                       a stray 3 never reports success without defining.
+                       (https://webidl.spec.whatwg.org/#legacy-platform-object-defineownproperty) */
+                    if (ret != JS_EXOTIC_FALLTHROUGH &&
+                        ret != JS_EXOTIC_FALLTHROUGH_SKIP_OWN) {
                         if (ret == false)
                             return JS_ThrowTypeErrorOrFalse(ctx, flags,
                                                              "cannot define property");
