@@ -543,6 +543,13 @@ JS_EXTERN JSRuntime *JS_GetRuntime(JSContext *ctx);
 JS_EXTERN void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj);
 JS_EXTERN JSValue JS_GetClassProto(JSContext *ctx, JSClassID class_id);
 JS_EXTERN JSValue JS_GetFunctionProto(JSContext *ctx);
+/* GetFunctionRealm returns a borrowed context, or NULL for a revoked proxy.
+   func_obj must be a callable object in ctx's runtime. */
+JS_EXTERN JSContext *JS_GetFunctionRealm(JSContext *ctx, JSValueConst func_obj);
+/* The active function is returned with an owned reference; outside a call it
+   is undefined. Constructor calls pass new.target as the callback's this. */
+JS_EXTERN JSValue JS_GetActiveFunctionRef(JSContext *ctx);
+JS_EXTERN bool JS_IsConstructorCall(JSContext *ctx);
 
 /* the following functions are used to select the intrinsic object to
    save memory */
@@ -1352,6 +1359,8 @@ JS_EXTERN JSValue JS_NewCFunctionData2(JSContext *ctx, JSCFunctionData *func,
                                        int length, int magic, int data_len,
                                        JSValueConst *data);
 typedef void JSCClosureFinalizerFunc(void*);
+/* Adopts opaque only on success. Failed creation leaves it with the caller.
+   The finalizer runs once on collection, while the home realm is still live. */
 JS_EXTERN JSValue JS_NewCClosure(JSContext *ctx, JSCClosure *func,
                                  const char *name,
                                  JSCClosureFinalizerFunc *opaque_finalize,
