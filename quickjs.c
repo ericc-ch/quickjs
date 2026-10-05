@@ -2860,6 +2860,7 @@ JSContext *JS_NewContextRaw(JSRuntime *rt)
     ctx->class_proto = js_malloc_rt(rt, sizeof(ctx->class_proto[0]) *
                                     rt->class_count);
     if (!ctx->class_proto) {
+        remove_gc_object(&ctx->header);
         js_free_rt(rt, ctx);
         return NULL;
     }
@@ -8676,7 +8677,7 @@ static no_inline __exception int __js_poll_interrupts(JSContext *ctx)
     JSRuntime *rt = ctx->rt;
     ctx->interrupt_counter = JS_INTERRUPT_COUNTER_INIT;
     if (rt->interrupt_handler) {
-        if (rt->interrupt_handler(rt, rt->interrupt_opaque)) {
+        if (rt->interrupt_handler(ctx, rt->interrupt_opaque)) {
             JS_ThrowInterrupted(ctx);
             return -1;
         }
@@ -42697,8 +42698,16 @@ static JSValue js_function_bind(JSContext *ctx, JSValueConst this_val,
     if (check_function(ctx, this_val))
         return JS_EXCEPTION;
 
-    func_obj = JS_NewObjectProtoClass(ctx, ctx->function_proto,
+    JSValue prototype = JS_GetPrototype(ctx, this_val);
+
+    if (JS_IsException(prototype))
+        return JS_EXCEPTION;
+    
+    func_obj = JS_NewObjectProtoClass(ctx, prototype,
                                  JS_CLASS_BOUND_FUNCTION);
+    
+    JS_FreeValue(ctx, prototype);
+
     if (JS_IsException(func_obj))
         return JS_EXCEPTION;
     p = JS_VALUE_GET_OBJ(func_obj);
@@ -49775,7 +49784,7 @@ int lre_check_timeout(void *opaque)
     JSContext *ctx = opaque;
     JSRuntime *rt = ctx->rt;
     return (rt->interrupt_handler &&
-            rt->interrupt_handler(rt, rt->interrupt_opaque));
+            rt->interrupt_handler(ctx, rt->interrupt_opaque));
 }
 
 void *lre_realloc(void *opaque, void *ptr, size_t size)
@@ -63121,7 +63130,8 @@ int JS_AddIntrinsicTypedArrays(JSContext *ctx)
 
 static double js__now_ms(void)
 {
-    return js__hrtime_ns() / 1e6;
+    uint64_t ns = js__hrtime_ns();
+    return (double)(ns / 1000000) + (double)(ns % 1000000) / 1e6;
 }
 
 static JSValue js_perf_now(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv)
