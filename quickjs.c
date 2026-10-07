@@ -10609,9 +10609,15 @@ static int JS_SetPropertyInternal2Impl(JSContext *ctx, JSValueConst obj, JSAtom 
 
     switch(JS_VALUE_GET_TAG(this_obj)) {
     case JS_TAG_NULL:
+        if (JS_IsObject(obj)) {
+            goto primitive_receiver;
+        }
         JS_ThrowTypeErrorAtom(ctx, "cannot set property '%s' of null", prop);
         goto fail;
     case JS_TAG_UNDEFINED:
+        if (JS_IsObject(obj)) {
+            goto primitive_receiver;
+        }
         JS_ThrowTypeErrorAtom(ctx, "cannot set property '%s' of undefined", prop);
         goto fail;
     case JS_TAG_OBJECT:
@@ -10623,6 +10629,8 @@ static int JS_SetPropertyInternal2Impl(JSContext *ctx, JSValueConst obj, JSAtom 
     default:
         if (JS_VALUE_GET_TAG(obj) != JS_TAG_OBJECT)
             obj = JS_GetPrototypePrimitive(ctx, obj);
+    
+    primitive_receiver:
         p = NULL;
         p1 = JS_VALUE_GET_OBJ(obj);
         goto prototype_lookup;
@@ -26445,11 +26453,7 @@ static __exception int get_lvalue(JSParseState *s, int *popcode, int *pscope,
                 opcode = OP_get_ref_value;
             }
             break;
-        case OP_get_array_el:
-            emit_op(s, OP_to_propkey2);
-            break;
-        case OP_get_super_value:
-            emit_op(s, OP_to_propkey);
+        default:
             break;
         }
     }
@@ -27202,6 +27206,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
 {
     FuncCallType call_type;
     int optional_chaining_label;
+    int import_line_num, import_col_num;
     bool accept_lparen = (parse_flags & PF_POSTFIX_CALL) != 0;
 
     call_type = FUNC_CALL_NORMAL;
@@ -27442,6 +27447,8 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
         }
         break;
     case TOK_IMPORT:
+        import_line_num = s->token.line_num;
+        import_col_num = s->token.col_num;
         if (next_token(s))
             return -1;
         if (s->token.val == '.') {
@@ -27481,6 +27488,7 @@ static __exception int js_parse_postfix_expr(JSParseState *s, int parse_flags)
             }
             if (js_parse_expect(s, ')'))
                 return -1;
+            emit_source_loc_at(s, import_line_num, import_col_num);
             emit_op(s, OP_import);
         }
         break;
@@ -28541,38 +28549,9 @@ static __exception int js_parse_assign_expr2(JSParseState *s, int parse_flags)
         if (get_lvalue(s, &opcode, &scope, &name, &label, NULL, (op != '='), op) < 0)
             return -1;
 
-        // comply with rather obtuse evaluation order of computed properties:
-        // obj[key]=val evaluates val->obj->key when obj is null/undefined
-        // but key->obj->val when an object
-        // FIXME(bnoordhuis) less stack shuffling; don't to_propkey twice in
-        // happy path; replace `dup is_undefined_or_null if_true` with new
-        // opcode if_undefined_or_null? replace `swap dup` with over?
-        if (op == '=' && opcode == OP_get_array_el) {
-            int label_next = -1;
-            JSFunctionDef *fd = s->cur_func;
-            assert(OP_to_propkey2 == fd->byte_code.buf[fd->last_opcode_pos]);
-            fd->byte_code.size = fd->last_opcode_pos;
-            fd->last_opcode_pos = -1;
-            emit_op(s, OP_swap); // obj key -> key obj
-            emit_op(s, OP_dup);
-            emit_op(s, OP_is_undefined_or_null);
-            label_next = emit_goto(s, OP_if_true, -1);
-            emit_op(s, OP_swap);
-            emit_op(s, OP_to_propkey);
-            emit_op(s, OP_swap);
-            emit_label(s, label_next);
-            emit_op(s, OP_swap);
-        }
-
         if (js_parse_assign_expr2(s, parse_flags)) {
             JS_FreeAtom(s->ctx, name);
             return -1;
-        }
-
-        if (op == '=' && opcode == OP_get_array_el) {
-            emit_op(s, OP_swap); // obj key val -> obj val key
-            emit_op(s, OP_to_propkey);
-            emit_op(s, OP_swap);
         }
 
         if (op == '=') {
@@ -58331,7 +58310,11 @@ static JSValue js_Date_parse(JSContext *ctx, JSValueConst this_val,
     /* convert the string as a byte array */
     for (i = 0; i < sp->len && i < (int)countof(buf) - 1; i++) {
         c = string_get(sp, i);
-        if (c > 255)
+        /* match V8 behaviour: treat Unicode space characters as regular spaces
+           in legacy dates, but not U+2028 and U+2029 (line terminators). */
+        if (c != 0x2028 && c != 0x2029 && lre_is_space(c))
+            c = ' ';
+        else if (c > 255)
             c = (c == 0x2212) ? '-' : 'x';
         buf[i] = c;
     }
