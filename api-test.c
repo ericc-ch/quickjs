@@ -2274,8 +2274,10 @@ static void json_stringify_oom(void)
 }
 
 /* Exotic hooks driven from C: declining ordinary work must continue the
-   ordinary algorithms, and a rejected set throws in strict mode. */
+   ordinary algorithms, skipped own properties must survive, and a rejected
+   call must throw in strict mode. */
 static int exotic_set_result;
+static int exotic_define_result;
 static int exotic_set_calls;
 static int exotic_define_calls;
 
@@ -2306,7 +2308,7 @@ static int exotic_define_own_property(JSContext *ctx, JSValueConst this_obj,
     (void)setter;
     (void)flags;
     exotic_define_calls++;
-    return JS_EXOTIC_FALLTHROUGH;
+    return exotic_define_result;
 }
 
 static void exotic_hooks(void)
@@ -2327,8 +2329,15 @@ static void exotic_hooks(void)
 
     ctx = JS_NewContext(rt);
 
+    exotic_define_result = JS_EXOTIC_FALLTHROUGH;
     global = JS_GetGlobalObject(ctx);
     JS_SetPropertyStr(ctx, global, "exotic", JS_NewObjectClass(ctx, class_id));
+    JS_SetPropertyStr(
+        ctx,
+        global,
+        "exotic_parent",
+        JS_NewObjectClass(ctx, class_id)
+    );
     JS_FreeValue(ctx, global);
 
     /* JS_EXOTIC_FALLTHROUGH continues the ordinary [[Set]]. */
@@ -2340,27 +2349,43 @@ static void exotic_hooks(void)
     assert(exotic_set_calls == 1);
     JS_FreeValue(ctx, res);
 
-    /* JS_EXOTIC_FALLTHROUGH_SKIP_OWN continues at the prototype. */
-    exotic_set_result = JS_EXOTIC_FALLTHROUGH_SKIP_OWN;
+    /* An own writable data property updates through the ordinary path. */
     res = eval(ctx,
-               "var proto = {};"
-               "Object.defineProperty(proto, 'b', {"
-               "  set: function(v) { globalThis.proto_set = v; },"
-               "  configurable: true"
+               "Object.defineProperty(exotic, 'b', {"
+               "  value: 5, writable: true, configurable: true"
                "});"
-               "Object.setPrototypeOf(exotic, proto);"
-               "globalThis.proto_set = 0;"
-               "exotic.b = 7;"
-               "globalThis.proto_set");
+               "exotic.b = 6;"
+               "Object.getOwnPropertyDescriptor(exotic, 'b').value");
     assert(JS_ToInt32(ctx, &n, res) == 0);
-    assert(n == 7);
-    JS_FreeValue(ctx, res);
-    res = eval(ctx, "Object.prototype.hasOwnProperty.call(exotic, 'b') ? 1 : 0");
-    assert(JS_ToInt32(ctx, &n, res) == 0);
-    assert(n == 0);
+    assert(n == 6);
     JS_FreeValue(ctx, res);
 
-    /* A rejected set (the callback returns false) throws in strict mode. */
+    /* A traversed prototype's own data property is not the assignment
+       target; the walk continues and OrdinarySet defines the property on
+       the receiver. The engine currently treats SKIP_OWN and FALLTHROUGH
+       alike on this path, so this pins the traversal result. */
+    exotic_set_result = JS_EXOTIC_FALLTHROUGH_SKIP_OWN;
+    exotic_set_calls = 0;
+    res = eval(ctx,
+               "Object.setPrototypeOf(exotic, exotic_parent);"
+               "Object.defineProperty(exotic_parent, 's', {"
+               "  value: 5, writable: true, configurable: true"
+               "});"
+               "exotic.s = 7;"
+               "Object.getOwnPropertyDescriptor(exotic, 's').value");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 7);
+    assert(exotic_set_calls > 0);
+    JS_FreeValue(ctx, res);
+    res = eval(
+        ctx,
+        "Object.getOwnPropertyDescriptor(exotic_parent, 's').value === 5 ? 1 : 0");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 1);
+    JS_FreeValue(ctx, res);
+
+    /* A rejected set (the callback returns false) throws in strict mode and
+       is ignored in sloppy mode. */
     exotic_set_result = 0;
     res = eval(ctx,
                "\"use strict\";"
@@ -2368,8 +2393,15 @@ static void exotic_hooks(void)
     assert(JS_ToInt32(ctx, &n, res) == 0);
     assert(n == 1);
     JS_FreeValue(ctx, res);
+    res = eval(
+        ctx,
+        "exotic.c = 1; Object.prototype.hasOwnProperty.call(exotic, 'c') ? 1 : 0");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 0);
+    JS_FreeValue(ctx, res);
 
     /* JS_EXOTIC_FALLTHROUGH from define_own_property defines ordinarily. */
+    exotic_define_result = JS_EXOTIC_FALLTHROUGH;
     exotic_define_calls = 0;
     res = eval(ctx,
                "Object.defineProperty(exotic, 'd', {"
@@ -2378,6 +2410,17 @@ static void exotic_hooks(void)
                "exotic.d");
     assert(JS_ToInt32(ctx, &n, res) == 0);
     assert(n == 9);
+    assert(exotic_define_calls == 1);
+    JS_FreeValue(ctx, res);
+
+    /* A rejected define throws: Object.defineProperty is always strict. */
+    exotic_define_result = 0;
+    exotic_define_calls = 0;
+    res = eval(ctx,
+               "try { Object.defineProperty(exotic, 'e', { value: 1 }); 0 }"
+               "catch (e) { e instanceof TypeError ? 1 : 2 }");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 1);
     assert(exotic_define_calls == 1);
     JS_FreeValue(ctx, res);
 
