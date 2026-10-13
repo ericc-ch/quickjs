@@ -2273,6 +2273,118 @@ static void json_stringify_oom(void)
     JS_FreeRuntime(rt);
 }
 
+/* Exotic hooks driven from C: declining ordinary work must continue the
+   ordinary algorithms, and a rejected set throws in strict mode. */
+static int exotic_set_result;
+static int exotic_set_calls;
+static int exotic_define_calls;
+
+static int exotic_set_property(JSContext *ctx, JSValueConst obj, JSAtom atom,
+                               JSValueConst value, JSValueConst receiver,
+                               int flags)
+{
+    (void)ctx;
+    (void)obj;
+    (void)atom;
+    (void)value;
+    (void)receiver;
+    (void)flags;
+    exotic_set_calls++;
+    return exotic_set_result;
+}
+
+static int exotic_define_own_property(JSContext *ctx, JSValueConst this_obj,
+                                      JSAtom prop, JSValueConst val,
+                                      JSValueConst getter, JSValueConst setter,
+                                      int flags)
+{
+    (void)ctx;
+    (void)this_obj;
+    (void)prop;
+    (void)val;
+    (void)getter;
+    (void)setter;
+    (void)flags;
+    exotic_define_calls++;
+    return JS_EXOTIC_FALLTHROUGH;
+}
+
+static void exotic_hooks(void)
+{
+    JSRuntime *rt = new_runtime();
+    static JSClassExoticMethods exotic = {
+        .set_property = exotic_set_property,
+        .define_own_property = exotic_define_own_property,
+    };
+    JSClassDef def = (JSClassDef){ .class_name = "ExoticTest", .exotic = &exotic };
+    JSClassID class_id = 0;
+    JSContext *ctx;
+    JSValue global, res;
+    int32_t n;
+
+    JS_NewClassID(rt, &class_id);
+    assert(0 == JS_NewClass(rt, class_id, &def));
+
+    ctx = JS_NewContext(rt);
+
+    global = JS_GetGlobalObject(ctx);
+    JS_SetPropertyStr(ctx, global, "exotic", JS_NewObjectClass(ctx, class_id));
+    JS_FreeValue(ctx, global);
+
+    /* JS_EXOTIC_FALLTHROUGH continues the ordinary [[Set]]. */
+    exotic_set_result = JS_EXOTIC_FALLTHROUGH;
+    exotic_set_calls = 0;
+    res = eval(ctx, "exotic.a = 1; exotic.a");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 1);
+    assert(exotic_set_calls == 1);
+    JS_FreeValue(ctx, res);
+
+    /* JS_EXOTIC_FALLTHROUGH_SKIP_OWN continues at the prototype. */
+    exotic_set_result = JS_EXOTIC_FALLTHROUGH_SKIP_OWN;
+    res = eval(ctx,
+               "var proto = {};"
+               "Object.defineProperty(proto, 'b', {"
+               "  set: function(v) { globalThis.proto_set = v; },"
+               "  configurable: true"
+               "});"
+               "Object.setPrototypeOf(exotic, proto);"
+               "globalThis.proto_set = 0;"
+               "exotic.b = 7;"
+               "globalThis.proto_set");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 7);
+    JS_FreeValue(ctx, res);
+    res = eval(ctx, "Object.prototype.hasOwnProperty.call(exotic, 'b') ? 1 : 0");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 0);
+    JS_FreeValue(ctx, res);
+
+    /* A rejected set (the callback returns false) throws in strict mode. */
+    exotic_set_result = 0;
+    res = eval(ctx,
+               "\"use strict\";"
+               "try { exotic.c = 1; 0 } catch (e) { e instanceof TypeError ? 1 : 2 }");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 1);
+    JS_FreeValue(ctx, res);
+
+    /* JS_EXOTIC_FALLTHROUGH from define_own_property defines ordinarily. */
+    exotic_define_calls = 0;
+    res = eval(ctx,
+               "Object.defineProperty(exotic, 'd', {"
+               "  value: 9, configurable: true, writable: true"
+               "});"
+               "exotic.d");
+    assert(JS_ToInt32(ctx, &n, res) == 0);
+    assert(n == 9);
+    assert(exotic_define_calls == 1);
+    JS_FreeValue(ctx, res);
+
+    JS_FreeContext(ctx);
+    JS_FreeRuntime(rt);
+}
+
 int main(void)
 {
     cfunctions();
@@ -2316,5 +2428,6 @@ int main(void)
     private_symbols();
     new_context_low_memory();
     json_stringify_oom();
+    exotic_hooks();
     return 0;
 }
