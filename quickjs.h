@@ -1202,6 +1202,15 @@ typedef void JSHostPromiseRejectionTracker(JSContext *ctx, JSValueConst promise,
                                            bool is_handled, void *opaque);
 JS_EXTERN void JS_SetHostPromiseRejectionTracker(JSRuntime *rt, JSHostPromiseRejectionTracker *cb, void *opaque);
 
+/* Consulted before a string is compiled into code from JS: `eval` (direct and
+   indirect) and the `Function` constructor, the surfaces reached through
+   JS_EvalObject(). Return != 0 to allow. Returning 0 refuses, and the callback
+   is expected to have raised the exception, which JS_EvalObject() then
+   propagates (<https://tc39.es/ecma262/#sec-hostensurecancompilestrings>). */
+typedef int JSCanCompileStringsHandler(JSContext *ctx, const char *input,
+                                       size_t input_len, void *opaque);
+JS_EXTERN void JS_SetCanCompileStringsHandler(JSRuntime *rt, JSCanCompileStringsHandler *cb, void *opaque);
+
 /* return != 0 if the JS code needs to be interrupted */
 typedef int JSInterruptHandler(JSContext *ctx, void *opaque);
 JS_EXTERN void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque);

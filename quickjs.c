@@ -391,6 +391,11 @@ struct JSRuntime {
     JSHostPromiseRejectionTracker *host_promise_rejection_tracker;
     void *host_promise_rejection_tracker_opaque;
 
+    /* if non-NULL, consulted before compiling a string from JS (`eval`,
+       `Function`); the host may refuse */
+    JSCanCompileStringsHandler *can_compile_strings_handler;
+    void *can_compile_strings_opaque;
+
     struct list_head job_list; /* list of JSJobEntry.link */
 
     bool module_normalize_has_attr;
@@ -2473,6 +2478,12 @@ void JS_SetInterruptHandler(JSRuntime *rt, JSInterruptHandler *cb, void *opaque)
 {
     rt->interrupt_handler = cb;
     rt->interrupt_opaque = opaque;
+}
+
+void JS_SetCanCompileStringsHandler(JSRuntime *rt, JSCanCompileStringsHandler *cb, void *opaque)
+{
+    rt->can_compile_strings_handler = cb;
+    rt->can_compile_strings_opaque = opaque;
 }
 
 void JS_SetCanBlock(JSRuntime *rt, bool can_block)
@@ -38391,6 +38402,16 @@ static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
     str = JS_ToCStringLen(ctx, &len, val);
     if (!str)
         return JS_EXCEPTION;
+    if (ctx->rt->can_compile_strings_handler &&
+        !ctx->rt->can_compile_strings_handler(ctx, str, len,
+                                              ctx->rt->can_compile_strings_opaque)) {
+        JS_FreeCString(ctx, str);
+        /* The handler is expected to have raised; refuse unconditionally so a
+           handler that forgot cannot compile the string anyway. */
+        return JS_HasException(ctx)
+                   ? JS_EXCEPTION
+                   : JS_ThrowPlainError(ctx, "code generation from strings is not allowed");
+    }
     ret = JS_EvalInternal(ctx, this_obj, str, len, "<input>", 1, flags, scope_idx);
     JS_FreeCString(ctx, str);
     return ret;
