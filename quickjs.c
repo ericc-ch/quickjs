@@ -31856,8 +31856,42 @@ JSAtom JS_GetScriptOrModuleName(JSContext *ctx, int n_stack_levels)
     return JS_DupAtom(ctx, b->filename);
 }
 
-JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m)
+int JS_GetStackFrameLocation(JSContext *ctx, int n_stack_levels,
+                             JSStackFrameLocation *location)
 {
+    JSStackFrame *sf;
+    JSFunctionBytecode *b;
+    JSObject *p;
+
+    location->filename = JS_ATOM_NULL;
+    location->line_num = -1;
+    location->col_num = -1;
+    location->native = 1;
+    sf = ctx->rt->current_stack_frame;
+    if (!sf)
+        return 0;
+    while (n_stack_levels-- > 0) {
+        sf = sf->prev_frame;
+        if (!sf)
+            return 0;
+    }
+    if (JS_VALUE_GET_TAG(sf->cur_func) == JS_TAG_OBJECT) {
+        p = JS_VALUE_GET_OBJ(sf->cur_func);
+        if (js_class_has_bytecode(p->class_id)) {
+            b = p->u.func.function_bytecode;
+            location->native = 0;
+            location->filename = JS_DupAtom(ctx, b->filename);
+            if (sf->cur_pc) {
+                uint32_t pc = sf->cur_pc - b->byte_code_buf - 1;
+                location->line_num = find_line_num(ctx, b, pc,
+                                                   &location->col_num);
+            }
+        }
+    }
+    return 1;
+}
+
+JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m){
     return JS_DupAtom(ctx, m->module_name);
 }
 

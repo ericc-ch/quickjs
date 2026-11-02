@@ -1318,6 +1318,26 @@ JS_EXTERN int JS_ResolveModule(JSContext *ctx, JSValueConst obj);
 
 /* only exported for os.Worker() */
 JS_EXTERN JSAtom JS_GetScriptOrModuleName(JSContext *ctx, int n_stack_levels);
+
+/* Where one frame of the running JS stack is executing. `filename` is
+   JS_ATOM_NULL when the frame has none; `native` is set for a frame that runs
+   no bytecode. `line_num` and `col_num` are 1-based and -1 when the position is
+   unknown. Reading a frame this way ignores Error.stackTraceLimit and
+   Error.prepareStackTrace, and never calls into JS. */
+typedef struct JSStackFrameLocation {
+    JSAtom filename;
+    int line_num;
+    int col_num;
+    int native;
+} JSStackFrameLocation;
+
+/* Fills `location` from the frame `n_stack_levels` above the innermost one and
+   returns 1, or returns 0 when there is no such frame. C functions are not
+   stack frames, so at level 0 the innermost frame is the script that is
+   running. The caller owns `location->filename` and must free it with
+   JS_FreeAtom(). */
+JS_EXTERN int JS_GetStackFrameLocation(JSContext *ctx, int n_stack_levels,
+                                       JSStackFrameLocation *location);
 /* only exported for os.Worker() */
 JS_EXTERN JSValue JS_LoadModule(JSContext *ctx, const char *basename,
                                 const char *filename);
