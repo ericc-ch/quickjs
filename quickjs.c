@@ -410,6 +410,8 @@ struct JSRuntime {
     } u;
     JSModuleCheckSupportedImportAttributes *module_check_attrs;
     void *module_loader_opaque;
+    JSDynamicImportFunc *dynamic_import;
+    void *dynamic_import_opaque;
     /* timestamp for internal use in module evaluation */
     int64_t module_async_evaluation_next_timestamp;
 
@@ -9054,6 +9056,7 @@ static JSValue js_bytecode_autoinit(JSContext *ctx, JSObject *p, JSAtom atom,
                                      "Object.defineProperty", 3,
                                      JS_CFUNC_generic_magic, 0),
                 JS_AtomToValue(ctx, JS_ATOM_Symbol_iterator),
+                JS_NewCFunction(ctx, js_call_function, "call", 2),
             };
             return js_bytecode_eval(ctx, qjsc_builtin_array_fromasync,
                                     sizeof(qjsc_builtin_array_fromasync),
@@ -30677,6 +30680,13 @@ void JS_SetModuleLoaderFunc2(JSRuntime *rt,
     rt->module_loader_opaque = opaque;
 }
 
+void JS_SetDynamicImportFunc(JSRuntime *rt, JSDynamicImportFunc *func,
+                             void *opaque)
+{
+    rt->dynamic_import = func;
+    rt->dynamic_import_opaque = opaque;
+}
+
 void JS_SetModuleNormalizeFunc2(JSRuntime *rt,
                                 JSModuleNormalizeFunc2 *module_normalize)
 {
@@ -32019,17 +32029,17 @@ static void JS_LoadModuleInternal(JSContext *ctx, const char *basename,
     JS_FreeValue(ctx, evaluate_promise);
 }
 
-/* Return a promise or an exception in case of memory error. Used by
-   os.Worker() */
+/* Return a promise or an exception in case of memory error. */
 JSValue JS_LoadModule(JSContext *ctx, const char *basename,
-                      const char *filename)
+                      const char *filename, JSValueConst attributes)
 {
     JSValue promise, resolving_funcs[2];
 
     promise = JS_NewPromiseCapability(ctx, resolving_funcs);
     if (JS_IsException(promise))
         return JS_EXCEPTION;
-    JS_LoadModuleInternal(ctx, basename, filename, vc(resolving_funcs), JS_UNDEFINED);
+    JS_LoadModuleInternal(ctx, basename, filename, vc(resolving_funcs),
+                          attributes);
     JS_FreeValue(ctx, resolving_funcs[0]);
     JS_FreeValue(ctx, resolving_funcs[1]);
     return promise;
@@ -32038,12 +32048,13 @@ JSValue JS_LoadModule(JSContext *ctx, const char *basename,
 static JSValue js_dynamic_import_job(JSContext *ctx,
                                      int argc, JSValueConst *argv)
 {
+    JSRuntime *rt = ctx->rt;
     JSValueConst *resolving_funcs = argv;
     JSValueConst basename_val = argv[2];
     JSValueConst specifier = argv[3];
     JSValueConst attributes = argv[4];
-    const char *basename = NULL, *filename;
-    JSValue ret, err;
+    JSValue ret, err, token = JS_UNDEFINED;
+    const char *basename = NULL, *filename = NULL;
 
     if (!JS_IsString(basename_val)) {
         JS_ThrowTypeError(ctx, "no function filename for import()");
@@ -32052,12 +32063,28 @@ static JSValue js_dynamic_import_job(JSContext *ctx,
     basename = JS_ToCString(ctx, basename_val);
     if (!basename)
         goto exception;
-
     filename = JS_ToCString(ctx, specifier);
     if (!filename)
         goto exception;
-
-    JS_LoadModuleInternal(ctx, basename, filename, resolving_funcs, attributes);
+    if (rt->dynamic_import) {
+        token = JS_NewObjectProto(ctx, JS_NULL);
+        if (JS_IsException(token))
+            goto exception;
+        if (JS_SetProperty(ctx, token, JS_ATOM_resolve,
+                           js_dup(resolving_funcs[0])) < 0) {
+            goto exception;
+        }
+        if (JS_SetProperty(ctx, token, JS_ATOM_reject,
+                           js_dup(resolving_funcs[1])) < 0) {
+            goto exception;
+        }
+        rt->dynamic_import(ctx, basename, filename, token, attributes,
+                           rt->dynamic_import_opaque);
+    } else {
+        // fallback for legacy code
+        JS_LoadModuleInternal(ctx, basename, filename, resolving_funcs,
+                              attributes);
+    }
     JS_FreeCString(ctx, filename);
     JS_FreeCString(ctx, basename);
     return JS_UNDEFINED;
@@ -32066,7 +32093,9 @@ static JSValue js_dynamic_import_job(JSContext *ctx,
     ret = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED, 1, vc(&err));
     JS_FreeValue(ctx, ret); /* XXX: what to do if exception ? */
     JS_FreeValue(ctx, err);
+    JS_FreeValue(ctx, token);
     JS_FreeCString(ctx, basename);
+    JS_FreeCString(ctx, filename);
     return JS_UNDEFINED;
 }
 
@@ -32172,6 +32201,43 @@ done:
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, err);
     goto done;
+}
+
+static JSValue js_finish_dynamic_import_job(JSContext *ctx,
+                                            int argc, JSValueConst *argv)
+{
+    JSValueConst token = argv[0];
+    JSValueConst promise = argv[1];
+    JSValueConst exception = argv[2];
+    JSValue ret, resolve, reject;
+
+    resolve = JS_GetProperty(ctx, token, JS_ATOM_resolve);
+    reject = JS_GetProperty(ctx, token, JS_ATOM_reject);
+    if (JS_IsException(promise)) {
+        ret = JS_Call(ctx, reject, JS_UNDEFINED, 1, &exception);
+    } else {
+        ret = JS_PromiseThen(ctx, promise, resolve, reject);
+    }
+    JS_FreeValue(ctx, resolve);
+    JS_FreeValue(ctx, reject);
+    return ret;
+}
+
+int JS_FinishDynamicImport(JSContext *ctx, JSValue token, JSValue promise,
+                           JSValue exception)
+{
+    JSValue args[3];
+    int ret;
+
+    args[0] = token;
+    args[1] = promise;
+    args[2] = exception;
+    ret = JS_EnqueueJob(ctx, js_finish_dynamic_import_job, countof(args),
+                        vc(args));
+    JS_FreeValue(ctx, token);
+    JS_FreeValue(ctx, promise);
+    JS_FreeValue(ctx, exception);
+    return ret;
 }
 
 static void js_set_module_evaluated(JSContext *ctx, JSModuleDef *m)
@@ -39792,9 +39858,8 @@ static int JS_ReadFunctionBytecode(BCReaderState *s, JSFunctionBytecode *b,
 
 static JSValue JS_ReadBigInt(BCReaderState *s)
 {
-    JSValue obj = JS_UNDEFINED;
     uint32_t len, i, n;
-    JSBigInt *p;
+    JSBigInt *p = NULL;
     js_limb_t v;
     uint8_t v8;
 
@@ -39833,7 +39898,7 @@ static JSValue JS_ReadBigInt(BCReaderState *s)
     bc_read_trace(s, "}\n");
     return JS_CompactBigInt(s->ctx, p);
  fail:
-    JS_FreeValue(s->ctx, obj);
+    js_free(s->ctx, p);
     return JS_EXCEPTION;
 }
 
@@ -40438,6 +40503,7 @@ static JSValue JS_ReadRegExp(BCReaderState *s)
     JSContext *ctx = s->ctx;
     JSString *pattern;
     JSString *bc;
+    JSValue obj;
 
     pattern = JS_ReadString(s);
     if (!pattern)
@@ -40456,9 +40522,16 @@ static JSValue JS_ReadRegExp(BCReaderState *s)
         return JS_ThrowInternalError(ctx, "bad regexp bytecode");
     }
 
-    return js_regexp_constructor_internal(ctx, JS_UNDEFINED,
-                                          JS_MKPTR(JS_TAG_STRING, pattern),
-                                          JS_MKPTR(JS_TAG_STRING, bc));
+    obj = js_regexp_constructor_internal(ctx, JS_UNDEFINED,
+                                         JS_MKPTR(JS_TAG_STRING, pattern),
+                                         JS_MKPTR(JS_TAG_STRING, bc));
+    if (JS_IsException(obj))
+        return JS_EXCEPTION;
+    if (BC_add_object_ref(s, obj)) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    return obj;
 }
 
 static JSValue JS_ReadDate(BCReaderState *s)
@@ -44177,6 +44250,7 @@ static JSValue js_array_find(JSContext *ctx, JSValueConst this_val,
             }
         }
         JS_FreeValue(ctx, val);
+        val = JS_UNDEFINED;
         JS_FreeValue(ctx, index_val);
     }
     JS_FreeValue(ctx, obj);
@@ -50123,14 +50197,13 @@ static JSValue JS_RegExpDelete(JSContext *ctx, JSValueConst this_val, JSValue ar
     if (JS_IsException(str_val))
         goto fail;
     str = JS_VALUE_GET_STRING(str_val);
+    val = JS_GetProperty(ctx, this_val, JS_ATOM_lastIndex);
+    if (JS_IsException(val) || JS_ToLengthFree(ctx, &last_index, val))
+        goto fail;
     re_bytecode = str8(re->bytecode);
     re_flags = lre_get_flags(re_bytecode);
     if ((re_flags & (LRE_FLAG_GLOBAL | LRE_FLAG_STICKY)) == 0) {
         last_index = 0;
-    } else {
-        val = JS_GetProperty(ctx, this_val, JS_ATOM_lastIndex);
-        if (JS_IsException(val) || JS_ToLengthFree(ctx, &last_index, val))
-            goto fail;
     }
     /* size by alloc_count: the register executor uses capture[] beyond
        the capture positions for its registers (see js_regexp_exec). */
@@ -54023,12 +54096,20 @@ static void js_map_finalizer(JSRuntime *rt, JSValueConst val)
     if (s) {
         /* if the object is deleted we are sure that no iterator is
            using it */
+        if (s->is_weak) {
+            /* first pass to remove the weak references, so that freeing
+               a value (e.g. a symbol that is also a key of this map)
+               cannot reset and free records we have yet to visit */
+            list_for_each(el, &s->records) {
+                mr = list_entry(el, JSMapRecord, link);
+                if (!mr->empty)
+                    delete_map_weak_ref(rt, mr);
+            }
+        }
         list_for_each_safe(el, el1, &s->records) {
             mr = list_entry(el, JSMapRecord, link);
             if (!mr->empty) {
-                if (s->is_weak)
-                    delete_map_weak_ref(rt, mr);
-                else
+                if (!s->is_weak)
                     JS_FreeValueRT(rt, mr->key);
                 JS_FreeValueRT(rt, mr->value);
             }
